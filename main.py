@@ -9,7 +9,7 @@ def run_insurance_agent():
             if user.lower() in {"exit", "quit"}:
                 break
             response = insurance_react_agent({"session_id": "default", "query": user})
-            print(f"\nIndia First Life Insurance: {response['response']}\n")
+            print(f"\nIRIS(IFL): {response['response']}\n")
         except KeyboardInterrupt:
             break
         except Exception as e:

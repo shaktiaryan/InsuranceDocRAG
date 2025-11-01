@@ -18,7 +18,8 @@ class Settings:
     POLICY_DOC_PATH = ["data/indiafirstlifeassuredincomeformilestonesplan-brochure-low1.pdf",
     "data/indiafirst-life-guaranteed-single-premium-plan-143n068v04.pdf", 
     "data/life-insurance-ki-kitaab-english.pdf"]
-    CUSTOMER_DATA_PATH = "data/customer_data.json"
+    CUSTOMER_DATA_PATH = "data/customers.json"  # Legacy format (for backward compatibility)
+    INSURANCE_DATABASE_PATH = "data/insurance_database.json"  # New comprehensive database
     
     # Azure OpenAI Configuration (for main chat)
     AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY")

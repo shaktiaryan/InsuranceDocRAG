@@ -1,4 +1,4 @@
-from langchain_core.vectorstores import InMemoryVectorStore
+from langchain_community.vectorstores import Chroma
 from langchain_openai import AzureOpenAIEmbeddings
 from langchain_ollama import OllamaEmbeddings
 from langchain_community.document_loaders import PyPDFLoader
@@ -22,8 +22,8 @@ def check_ollama_connection() -> bool:
     except Exception:
         return False
 
-def create_in_memory_vector_store(pdf_paths: Union[str, List[str]]) -> InMemoryVectorStore:
-    """Create vector store using either Ollama or Azure embeddings"""
+def create_vector_store(pdf_paths: Union[str, List[str]]) -> Chroma:
+    """Create persistent vector store using either Ollama or Azure embeddings"""
     # Handle both single path and list of paths
     if isinstance(pdf_paths, str):
         pdf_paths = [pdf_paths]
@@ -80,13 +80,18 @@ def create_in_memory_vector_store(pdf_paths: Union[str, List[str]]) -> InMemoryV
         )
 
     print("Creating vector store...")
-    vector_store = InMemoryVectorStore.from_documents(chunks, embeddings)
+    # Create a persistent Chroma vector store
+    vector_store = Chroma.from_documents(
+        documents=chunks,
+        embedding=embeddings,
+        persist_directory="./vector_store"  # Store data persistently
+    )
     print("Vector store created successfully!")
     
     return vector_store
 
 # Initialize vector store with either Ollama or Azure embeddings
-vector_store: Optional[InMemoryVectorStore] = None
+vector_store: Optional[Chroma] = None
 
 print("🚀 Initializing RAG pipeline...")
 
@@ -100,7 +105,7 @@ else:
     print("📡 Using Azure OpenAI embeddings")
 
 try:
-    vector_store = create_in_memory_vector_store(Settings.POLICY_DOC_PATH)
+    vector_store = create_vector_store(Settings.POLICY_DOC_PATH)
 except Exception as e:
     print(f"❌ Could not create vector store: {str(e)}")
     print("📋 Will use basic policy information instead")
@@ -145,6 +150,249 @@ def policy_docs_qna_tool(query: str) -> str:
         print(f"❌ Error in policy search: {str(e)}")
         return "I encountered an issue retrieving policy information. Please contact customer service at 1800-209-8700 for assistance."
 
+def read_insurance_database(file_path: Optional[str] = None) -> dict:
+    """Read the comprehensive insurance database with all tables"""
+    if file_path is None:
+        # Use absolute path relative to the project root
+        script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        file_path = os.path.join(script_dir, "data", "insurance_database.json")
+    
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        print(f"Warning: Database file {file_path} not found.")
+        return {"customers": [], "policies": [], "claims": [], "payments": []}
+    except json.JSONDecodeError:
+        print(f"Error: Invalid JSON format in {file_path}.")
+        return {"customers": [], "policies": [], "claims": [], "payments": []}
+
+# Load the comprehensive insurance database
+# Get the absolute path to the database file
+script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+insurance_db_path = os.path.join(script_dir, "data", "insurance_database.json")
+
+if os.path.exists(insurance_db_path):
+    insurance_db = read_insurance_database(insurance_db_path)
+    print(f"✅ Loaded insurance database with {len(insurance_db.get('customers', []))} customers, {len(insurance_db.get('policies', []))} policies")
+else:
+    print(f"Warning: Insurance database not found at {insurance_db_path}")
+    insurance_db = {"customers": [], "policies": [], "claims": [], "payments": []}
+
+def _customer_lookup(customer_identifier: str) -> dict:
+    """Internal function for customer lookup"""
+    try:
+        customers = insurance_db.get("customers", [])
+        policies = insurance_db.get("policies", [])
+        claims = insurance_db.get("claims", [])
+        payments = insurance_db.get("payments", [])
+        
+        # Find customer by various identifiers
+        customer = None
+        identifier = customer_identifier.strip().lower()
+        
+        for cust in customers:
+            # Check by customer_id
+            if str(cust.get("customer_id")) == identifier:
+                customer = cust
+                break
+            # Check by full name
+            full_name = f"{cust.get('first_name', '')} {cust.get('last_name', '')}".lower()
+            if identifier in full_name or full_name in identifier:
+                customer = cust
+                break
+            # Check by email
+            if cust.get("email", "").lower() == identifier:
+                customer = cust
+                break
+            # Check by phone
+            if cust.get("phone", "") == customer_identifier:
+                customer = cust
+                break
+        
+        if not customer:
+            return {"message": "Customer not found. Please provide a valid customer ID, name, email, or phone number."}
+        
+        # Get customer's policies
+        customer_policies = [p for p in policies if p.get("customer_id") == customer.get("customer_id")]
+        
+        # Get customer's claims (through policies)
+        policy_ids = [p.get("policy_id") for p in customer_policies]
+        customer_claims = [c for c in claims if c.get("policy_id") in policy_ids]
+        
+        # Get customer's payments (through policies)
+        customer_payments = [p for p in payments if p.get("policy_id") in policy_ids]
+        
+        return {
+            "customer_info": customer,
+            "policies": customer_policies,
+            "claims": customer_claims,
+            "payments": customer_payments,
+            "summary": {
+                "total_policies": len(customer_policies),
+                "active_policies": len([p for p in customer_policies if p.get("status") == "Active"]),
+                "total_claims": len(customer_claims),
+                "total_premium_paid": sum([p.get("amount", 0) for p in customer_payments if p.get("status") == "Completed"])
+            }
+        }
+        
+    except Exception as e:
+        return {"error": f"Error retrieving customer information: {str(e)}"}
+
+@tool
+def customer_lookup_tool(customer_identifier: str) -> dict:
+    """
+    Retrieve comprehensive customer information by customer ID, name, email, or phone.
+    Supports: customer_id (e.g., "1"), name (e.g., "Rajesh Sharma"), email, or phone number.
+    """
+    return _customer_lookup(customer_identifier)
+
+@tool
+def policy_details_tool(policy_identifier: str) -> dict:
+    """
+    Retrieve detailed policy information by policy number or policy ID.
+    Supports: policy_number (e.g., "IFL-TERM-001") or policy_id (e.g., "101").
+    """
+    try:
+        policies = insurance_db.get("policies", [])
+        customers = insurance_db.get("customers", [])
+        claims = insurance_db.get("claims", [])
+        payments = insurance_db.get("payments", [])
+        
+        # Find policy by policy_number or policy_id
+        policy = None
+        identifier = policy_identifier.strip()
+        
+        for pol in policies:
+            if pol.get("policy_number") == identifier or str(pol.get("policy_id")) == identifier:
+                policy = pol
+                break
+        
+        if not policy:
+            return {"message": "Policy not found. Please provide a valid policy number or policy ID."}
+        
+        # Get customer information
+        customer = next((c for c in customers if c.get("customer_id") == policy.get("customer_id")), None)
+        
+        # Get policy claims
+        policy_claims = [c for c in claims if c.get("policy_id") == policy.get("policy_id")]
+        
+        # Get policy payments
+        policy_payments = [p for p in payments if p.get("policy_id") == policy.get("policy_id")]
+        
+        return {
+            "policy_info": policy,
+            "customer_info": customer,
+            "claims": policy_claims,
+            "payments": policy_payments,
+            "summary": {
+                "policy_status": policy.get("status"),
+                "premium_due": policy.get("premium_amount"),
+                "coverage_amount": policy.get("coverage_amount"),
+                "total_claims": len(policy_claims),
+                "last_payment": max([p.get("payment_date") for p in policy_payments], default="No payments") if policy_payments else "No payments"
+            }
+        }
+        
+    except Exception as e:
+        return {"error": f"Error retrieving policy information: {str(e)}"}
+
+@tool
+def claims_status_tool(claim_identifier: Optional[str] = None, customer_id: Optional[str] = None) -> dict:
+    """
+    Retrieve claims information by claim number/ID or all claims for a customer.
+    Supports: claim_number (e.g., "CLM-2024-001"), claim_id, or customer_id for all claims.
+    """
+    try:
+        claims = insurance_db.get("claims", [])
+        policies = insurance_db.get("policies", [])
+        customers = insurance_db.get("customers", [])
+        
+        if claim_identifier:
+            # Find specific claim
+            claim = None
+            identifier = claim_identifier.strip()
+            
+            for clm in claims:
+                if clm.get("claim_number") == identifier or str(clm.get("claim_id")) == identifier:
+                    claim = clm
+                    break
+            
+            if not claim:
+                return {"message": "Claim not found. Please provide a valid claim number or claim ID."}
+            
+            # Get related policy and customer info
+            policy = next((p for p in policies if p.get("policy_id") == claim.get("policy_id")), None)
+            customer = next((c for c in customers if c.get("customer_id") == policy.get("customer_id")), None) if policy else None
+            
+            return {
+                "claim_info": claim,
+                "policy_info": policy,
+                "customer_info": customer
+            }
+        
+        elif customer_id:
+            # Get all claims for a customer
+            customer_policies = [p for p in policies if str(p.get("customer_id")) == str(customer_id)]
+            policy_ids = [p.get("policy_id") for p in customer_policies]
+            customer_claims = [c for c in claims if c.get("policy_id") in policy_ids]
+            
+            return {
+                "customer_claims": customer_claims,
+                "total_claims": len(customer_claims),
+                "pending_claims": [c for c in customer_claims if c.get("status") in ["Under Investigation", "Pending Documentation"]],
+                "approved_claims": [c for c in customer_claims if c.get("status") == "Approved"]
+            }
+        
+        else:
+            return {"message": "Please provide either a claim identifier or customer ID."}
+            
+    except Exception as e:
+        return {"error": f"Error retrieving claims information: {str(e)}"}
+
+@tool
+def payment_history_tool(customer_id: Optional[str] = None, policy_id: Optional[str] = None) -> dict:
+    """
+    Retrieve payment history for a customer or specific policy.
+    Supports: customer_id for all payments or policy_id for specific policy payments.
+    """
+    try:
+        payments = insurance_db.get("payments", [])
+        policies = insurance_db.get("policies", [])
+        
+        if policy_id:
+            # Get payments for specific policy
+            policy_payments = [p for p in payments if str(p.get("policy_id")) == str(policy_id)]
+            policy = next((p for p in policies if str(p.get("policy_id")) == str(policy_id)), None)
+            
+            return {
+                "policy_payments": policy_payments,
+                "policy_info": policy,
+                "total_paid": sum([p.get("amount", 0) for p in policy_payments if p.get("status") == "Completed"]),
+                "pending_payments": [p for p in policy_payments if p.get("status") == "Pending"],
+                "failed_payments": [p for p in policy_payments if p.get("status") == "Failed"]
+            }
+        
+        elif customer_id:
+            # Get all payments for customer
+            customer_policies = [p for p in policies if str(p.get("customer_id")) == str(customer_id)]
+            policy_ids = [p.get("policy_id") for p in customer_policies]
+            customer_payments = [p for p in payments if p.get("policy_id") in policy_ids]
+            
+            return {
+                "customer_payments": customer_payments,
+                "total_paid": sum([p.get("amount", 0) for p in customer_payments if p.get("status") == "Completed"]),
+                "recent_payments": sorted(customer_payments, key=lambda x: x.get("payment_date", ""), reverse=True)[:5],
+                "payment_methods": list(set([p.get("payment_method") for p in customer_payments]))
+            }
+        
+        else:
+            return {"message": "Please provide either a customer ID or policy ID."}
+            
+    except Exception as e:
+        return {"error": f"Error retrieving payment information: {str(e)}"}
+
+# Keep the original customer_data_tool for backward compatibility with old JSON format
 def read_customer_data(file_path: str = "customers.json") -> dict:
     try:
         with open(file_path, "r", encoding="utf-8") as f:
@@ -156,14 +404,20 @@ def read_customer_data(file_path: str = "customers.json") -> dict:
         print(f"Error: Invalid JSON format in {file_path}.")
         return {}
 
-# Check if customer data file exists before reading
+# Check if old customer data file exists for backward compatibility
 if os.path.exists(Settings.CUSTOMER_DATA_PATH):
     customer_data = read_customer_data(Settings.CUSTOMER_DATA_PATH)
 else:
-    print(f"Warning: Customer data file not found at {Settings.CUSTOMER_DATA_PATH}")
+    print(f"Info: Using new database format, old customer data file not found at {Settings.CUSTOMER_DATA_PATH}")
     customer_data = {}
 
 @tool
 def customer_data_tool(customer_id: str) -> dict:
-    """Retrieve customer policy details and information for a given customer ID"""
+    """Legacy tool: Retrieve customer policy details and information for a given customer ID (backward compatibility)"""
+    # Try new database first by calling the internal function
+    result = _customer_lookup(customer_id)
+    if "message" not in result:
+        return result
+    
+    # Fallback to old format
     return customer_data.get(customer_id, {"message": "Customer not found"})
